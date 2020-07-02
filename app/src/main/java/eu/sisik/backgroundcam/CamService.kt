@@ -10,19 +10,16 @@ import android.graphics.ImageFormat
 import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
-import android.hardware.camera2.CameraDevice.TEMPLATE_RECORD
 import android.media.ImageReader
-import android.media.MediaRecorder
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
 import android.support.v4.app.ActivityCompat
 import android.support.v4.app.NotificationCompat
 import android.util.Log
+import android.util.Log.DEBUG
 import android.util.Size
-import android.util.SparseIntArray
 import android.view.*
-import android.widget.Toast
+import eu.sisik.backgroundcam.MediaEncoder.MediaEncoderListener
 import java.io.IOException
 import kotlin.math.absoluteValue
 
@@ -30,7 +27,7 @@ import kotlin.math.absoluteValue
 /**
  * Copyright (c) 2019 by Roman Sisik. All rights reserved.
  */
-class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback {
+class CamService: Service() {
 
     // UI
     private var wm: WindowManager? = null
@@ -48,10 +45,6 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
     // You can start service in 2 modes - 1.) with preview 2.) without preview (only bg processing)
     private var shouldShowPreview = true
 
-    //New MediaRecorder Implements
-    private var videoSize: Size? = null;
-    private var mediaRecorder: MediaRecorder? = null;
-
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
 
@@ -59,15 +52,13 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
             session: CameraCaptureSession,
             request: CaptureRequest,
             partialResult: CaptureResult
-        ) {
-        }
+        ) {}
 
         override fun onCaptureCompleted(
             session: CameraCaptureSession,
             request: CaptureRequest,
             result: TotalCaptureResult
-        ) {
-        }
+        ) {}
     }
 
     private val surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -123,7 +114,7 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
 
-        when (intent?.action) {
+        when(intent?.action) {
             ACTION_START -> start()
 
             ACTION_START_WITH_PREVIEW -> startWithPreview()
@@ -132,22 +123,17 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
         return super.onStartCommand(intent, flags, startId)
     }
 
-    private val PermissionsRequestCode = 123
-    private lateinit var managePermissions: ManagePermissions
-
     override fun onCreate() {
         super.onCreate()
         startForeground()
-        startRecordingVideo()
-
     }
-
 
     override fun onDestroy() {
         super.onDestroy()
 
+        stopRecording()
+
         stopCamera()
-        startRecordingVideo()
 
         if (rootView != null)
             wm?.removeView(rootView)
@@ -156,6 +142,7 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
     }
 
     private fun start() {
+        startRecording()
 
         shouldShowPreview = false
 
@@ -163,6 +150,7 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
     }
 
     private fun startWithPreview() {
+        startRecording()
 
         shouldShowPreview = true
 
@@ -231,11 +219,7 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
         cameraManager!!.openCamera(camId, stateCallback, null)
     }
 
-    private fun chooseSupportedSize(
-        camId: String,
-        textureViewWidth: Int,
-        textureViewHeight: Int
-    ): Size {
+    private fun chooseSupportedSize(camId: String, textureViewWidth: Int, textureViewHeight: Int): Size {
 
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
@@ -246,13 +230,13 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
 
         // We want to find something near the size of our TextureView
         val texViewArea = textureViewWidth * textureViewHeight
-        val texViewAspect = textureViewWidth.toFloat() / textureViewHeight.toFloat()
+        val texViewAspect = textureViewWidth.toFloat()/textureViewHeight.toFloat()
 
         val nearestToFurthestSz = supportedSizes.sortedWith(compareBy(
             // First find something with similar aspect
             {
                 val aspect = if (it.width < it.height) it.width.toFloat() / it.height.toFloat()
-                else it.height.toFloat() / it.width.toFloat()
+                else it.height.toFloat()/it.width.toFloat()
                 (aspect - texViewAspect).absoluteValue
             },
             // Also try to get similar resolution
@@ -276,8 +260,7 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
             }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel =
-                NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_NONE)
+            val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_NONE)
             channel.lightColor = Color.BLUE
             channel.lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -301,42 +284,34 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
             val targetSurfaces = ArrayList<Surface>()
 
             // Prepare CaptureRequest that can be used with CameraCaptureSession
-            val requestBuilder =
-                cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            val requestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
 
-                    if (shouldShowPreview) {
-                        val texture = textureView!!.surfaceTexture!!
-                        texture.setDefaultBufferSize(previewSize!!.width, previewSize!!.height)
-                        val previewSurface = Surface(texture)
+                if (shouldShowPreview) {
+                    val texture = textureView!!.surfaceTexture!!
+                    texture.setDefaultBufferSize(previewSize!!.width, previewSize!!.height)
+                    val previewSurface = Surface(texture)
 
-                        targetSurfaces.add(previewSurface)
-                        addTarget(previewSurface)
-                    }
-
-                    // Configure target surface for background processing (ImageReader)
-                    imageReader = ImageReader.newInstance(
-                        previewSize!!.getWidth(), previewSize!!.getHeight(),
-                        ImageFormat.YUV_420_888, 2
-                    )
-                    imageReader!!.setOnImageAvailableListener(imageListener, null)
-
-                    targetSurfaces.add(imageReader!!.surface)
-                    addTarget(imageReader!!.surface)
-
-                    // Set some additional parameters for the request
-                    set(
-                        CaptureRequest.CONTROL_AF_MODE,
-                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                    )
-                    set(
-                        CaptureRequest.CONTROL_AE_MODE,
-                        CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
-                    )
+                    targetSurfaces.add(previewSurface)
+                    addTarget(previewSurface)
                 }
 
+                // Configure target surface for background processing (ImageReader)
+                imageReader = ImageReader.newInstance(
+                    previewSize!!.getWidth(), previewSize!!.getHeight(),
+                    ImageFormat.YUV_420_888, 2
+                )
+                imageReader!!.setOnImageAvailableListener(imageListener, null)
+
+                targetSurfaces.add(imageReader!!.surface)
+                addTarget(imageReader!!.surface)
+
+                // Set some additional parameters for the request
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+            }
+
             // Prepare CameraCaptureSession
-            cameraDevice!!.createCaptureSession(
-                targetSurfaces,
+            cameraDevice!!.createCaptureSession(targetSurfaces,
                 object : CameraCaptureSession.StateCallback() {
 
                     override fun onConfigured(cameraCaptureSession: CameraCaptureSession) {
@@ -349,11 +324,7 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
                         try {
                             // Now we can start capturing
                             captureRequest = requestBuilder!!.build()
-                            captureSession!!.setRepeatingRequest(
-                                captureRequest!!,
-                                captureCallback,
-                                null
-                            )
+                            captureSession!!.setRepeatingRequest(captureRequest!!, captureCallback, null)
 
                         } catch (e: CameraAccessException) {
                             Log.e(TAG, "createCaptureSession", e)
@@ -402,135 +373,54 @@ class CamService : Service(), ActivityCompat.OnRequestPermissionsResultCallback 
 
     }
 
-    //New MediaRecord Implements
+    private var mMuxer: MediaMuxerWrapper? = null
+    private var mCameraView: CameraGLView? = null
 
-    private val REQUEST_VIDEO_PERMISSIONS = 1
-    private val VIDEO_PERMISSIONS = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-    private var nextVideoAbsolutePath: String? = null
-    private var sensorOrientation = 0
-    private var backgroundHandler: Handler? = null
-    private lateinit var previewRequestBuilder: CaptureRequest.Builder
-    private val FRAGMENT_DIALOG = "dialog"
-    private val SENSOR_ORIENTATION_DEFAULT_DEGREES = 90
-    private val SENSOR_ORIENTATION_INVERSE_DEGREES = 270
-    private val DEFAULT_ORIENTATIONS = SparseIntArray().apply {
-        append(Surface.ROTATION_0, 90)
-        append(Surface.ROTATION_90, 0)
-        append(Surface.ROTATION_180, 270)
-        append(Surface.ROTATION_270, 180)
-    }
-    private val INVERSE_ORIENTATIONS = SparseIntArray().apply {
-        append(Surface.ROTATION_0, 270)
-        append(Surface.ROTATION_90, 180)
-        append(Surface.ROTATION_180, 90)
-        append(Surface.ROTATION_270, 0)
-    }
+    
 
-
-    @Throws(IOException::class)
-    private fun setUpMediaRecorder() {
-
-        mediaRecorder?.apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
-            setVideoSource(MediaRecorder.VideoSource.SURFACE)
-            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            setOutputFile(nextVideoAbsolutePath)
-            setVideoEncodingBitRate(10000000)
-            setVideoFrameRate(30)
-            videoSize?.width?.let { setVideoSize(it, videoSize!!.height) }
-            setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            prepare()
-        }
-
-    }
-
-    private fun getVideoFilePath(context: Context?): String {
-        val filename = "${System.currentTimeMillis()}.mp4"
-        val dir = context?.getExternalFilesDir(null)
-
-        return if (dir == null) {
-            filename
-        } else {
-            "${dir.absolutePath}/$filename"
-        }
-    }
-
-    private fun startRecordingVideo() {
-        if (cameraDevice == null || !textureView?.isAvailable!!) return
-
+    private fun startRecording() {
+        Log.v(TAG, "startRecording:")
         try {
-            //closePreviewSession()
-            setUpMediaRecorder()
-            val texture = textureView!!.surfaceTexture.apply {
-                previewSize?.width?.let { setDefaultBufferSize(it, previewSize!!.height) }
+            //mRecordButton.setColorFilter(-0x10000) // turn red
+            mMuxer = MediaMuxerWrapper(".mp4") // if you record audio only, ".m4a" is also OK.
+            mCameraView?.videoHeight?.let {
+                MediaVideoEncoder(
+                    mMuxer,
+                    mMediaEncoderListener,
+                    mCameraView?.videoWidth!!,
+                    it
+                )
             }
-
-            // Set up Surface for camera preview and MediaRecorder
-            val previewSurface = Surface(texture)
-            val recorderSurface = mediaRecorder!!.surface
-            val surfaces = ArrayList<Surface>().apply {
-                add(previewSurface)
-                add(recorderSurface)
-            }
-            previewRequestBuilder = cameraDevice!!.createCaptureRequest(TEMPLATE_RECORD).apply {
-                addTarget(previewSurface)
-                addTarget(recorderSurface)
-            }
-
-            // Start a capture session
-            // Once the session starts, we can update the UI and start recording
-            cameraDevice?.createCaptureSession(surfaces,
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigureFailed(p0: CameraCaptureSession) {
-                        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
-                    }
-
-                    override fun onConfigured(cameraCaptureSession: CameraCaptureSession) {
-                        captureSession = cameraCaptureSession
-                        //updatePreview()
-                        mediaRecorder?.start()
-
-                    }
-
-                }, backgroundHandler)
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, e.toString())
+            MediaAudioEncoder(mMuxer, mMediaEncoderListener)
+            mMuxer!!.prepare()
+            mMuxer!!.startRecording()
         } catch (e: IOException) {
-            Log.e(TAG, e.toString())
+            //mRecordButton.setColorFilter(0)
+            Log.e(TAG, "startCapture:", e)
         }
+
 
     }
 
-    private fun stopRecordingVideo() {
-        mediaRecorder?.apply {
-            stop()
-            reset()
-        }
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>,
-                                            grantResults: IntArray) {
-        when (requestCode) {
-            PermissionsRequestCode ->{
-                val isPermissionsGranted = managePermissions
-                    .processPermissionsResult(requestCode,permissions,grantResults)
-
-                if(isPermissionsGranted){
-                    // Do the task now
-                    toast("Permissions granted.")
-                }else{
-                    toast("Permissions denied.")
-                }
-                return
-            }
+    private fun stopRecording() {
+        Log.v(TAG, "stopRecording:mMuxer=$mMuxer")
+        //mRecordButton.setColorFilter(0) // return to default color
+        if (mMuxer != null) {
+            mMuxer!!.stopRecording()
+            mMuxer = null
+            // you should not wait here
         }
     }
 
-    private fun Context.toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    private val mMediaEncoderListener: MediaEncoderListener = object : MediaEncoderListener {
+        override fun onPrepared(encoder: MediaEncoder) {
+            Log.v(TAG, "onPrepared:encoder=$encoder")
+            if (encoder is MediaVideoEncoder) mCameraView?.setVideoEncoder(encoder)
+        }
+
+        override fun onStopped(encoder: MediaEncoder) {
+            Log.v(TAG, "onStopped:encoder=$encoder")
+            if (encoder is MediaVideoEncoder) mCameraView?.setVideoEncoder(null)
+        }
     }
-
-
-
 }
